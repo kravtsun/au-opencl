@@ -1,3 +1,4 @@
+#define _CRT_SECURE_NO_WARNINGS
 #define CL_HPP_ENABLE_EXCEPTIONS
 #include <CL/cl.h>
 #define CL_HPP_MINIMUM_OPENCL_VERSION 120
@@ -11,6 +12,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <functional>
+#include <cstdio>
 #include <cmath>
 #include <cassert>
 
@@ -21,20 +23,21 @@
 //N = 31. M = 9. Обе матрицы состоят из единиц.
 //N = 1023. M = 9. Обе матрицы состоят из единиц.
 
-template<typename T, typename Comp=std::equal_to<T>>
-struct MatrixT
+
+#define DOUBLE_EPS 1e-6
+struct Matrix
 {
-    MatrixT(int n)
+    Matrix(int n)
         : n_(n)
         , v_(n * n, 0)
     {}
     
-    T &get(int i, int j)
+    double &get(int i, int j)
     {
         return v_[index(i, j)];
     }
 
-    const T &get(int i, int j) const
+    const double &get(int i, int j) const
     {
         return v_[index(i, j)];
     }
@@ -49,12 +52,12 @@ struct MatrixT
         return n_ * n_;
     }
 
-    T *data()
+    double *data()
     {
         return &v_[0];
     }
 
-    friend std::istream &operator >> (std::istream &is, MatrixT &matrix) {
+    friend std::istream &operator >> (std::istream &is, Matrix &matrix) {
         for (auto & x : matrix.v_)
         {
             is >> x;
@@ -62,7 +65,7 @@ struct MatrixT
         return is;
     }
 
-    friend std::ostream &operator << (std::ostream &os, const MatrixT &matrix) {
+    friend std::ostream &operator << (std::ostream &os, const Matrix &matrix) {
         for (int i = 0; i < matrix.n_; ++i)
         {
             for (int j = 0; j < matrix.n_; ++j)
@@ -74,7 +77,12 @@ struct MatrixT
         return os;
     }
 
-    friend bool operator==(const MatrixT &lhs, const MatrixT &rhs)
+    static bool are_equal(double lhs, double rhs)
+    {
+        return fabs(lhs - rhs) < DOUBLE_EPS;
+    }
+
+    friend bool operator==(const Matrix &lhs, const Matrix &rhs)
     {
         if (lhs.n_ != rhs.n_)
         {
@@ -85,7 +93,7 @@ struct MatrixT
         {
             for (int j = 0; j < n; ++j)
             {
-                if (!comparator_(lhs.get(i, j), rhs.get(i, j)))
+                if (!are_equal(lhs.get(i, j), rhs.get(i, j)))
                 {
                     return false;
                 }
@@ -94,10 +102,14 @@ struct MatrixT
         return true;
     }
 
+    friend bool operator!=(const Matrix &lhs, const Matrix &rhs)
+    {
+        return !(lhs == rhs);
+    }
+
 private:
-    static Comp comparator_;
     int n_;
-    std::vector<T> v_;
+    std::vector<double> v_;
 
     size_t index(int i, int j) const
     {
@@ -106,18 +118,6 @@ private:
         return static_cast<size_t>(bias);
     }
 };
-
-struct DoubleComparator
-{
-    static const double EPS;
-
-    bool operator()(double a, double b) const {
-        return fabs(a - b) < EPS;
-    }
-};
-const double DoubleComparator::EPS = 1e-6;
-
-typedef MatrixT<double, DoubleComparator> Matrix;
 
 Matrix convolve_2d_cpu(const Matrix &a, const Matrix &b)
 {
@@ -146,6 +146,33 @@ Matrix convolve_2d_cpu(const Matrix &a, const Matrix &b)
     return res;
 }
 
+
+#define STRINGIFY(x) #x
+#define BLOCK_SIZE 16
+
+int closest_power_of_two(const int x)
+{
+    if (x == 0)
+    {
+        return 0;
+    }
+
+    int i = 0;
+    int tmp = x;
+    do
+    {
+        i++;
+        tmp >>= 1;
+    } while (tmp);
+
+
+    if (1 << (i - 1) == x)
+    {
+        return x;
+    }
+    return 1 << i;
+}
+
 int main()
 {
     using std::vector;
@@ -159,85 +186,82 @@ int main()
     fin >> n >> m;
     Matrix a(n), b(m);
     fin >> a >> b;
-    cout << convolve_2d_cpu(a, b) << endl;
+    auto expected = convolve_2d_cpu(a, b);
 
     vector<cl::Platform> platforms;
     vector<cl::Device> devices;
     vector<cl::Kernel> kernels;
 
     try {
-        // create platform
         cl::Platform::get(&platforms);
         platforms[0].getDevices(CL_DEVICE_TYPE_GPU, &devices);
 
-        // create context
         cl::Context context(devices);
-
-        // create command queue
         cl::CommandQueue queue(context, devices[0], CL_QUEUE_PROFILING_ENABLE);
 
-        // load opencl source
         ifstream cl_file("convolution_2d.cl");
         string cl_string(std::istreambuf_iterator<char>(cl_file), (std::istreambuf_iterator<char>()));
 
         cl::Program::Sources source({ cl_string });
-
-        // create program
         cl::Program program(context, source);
-
-        // compile opencl source
-        program.build(devices);
-
-        // create a message to send to kernel
-        size_t const block_size = 512;
-        size_t const test_array_size = 512;
-        size_t const mask_size = 9;
-
-        vector<int> input(test_array_size, 1);
-        vector<int> output(test_array_size, 1);
-        int mask[mask_size] = { 1, 1, 1, 1, -1, 1, 1, 1, 1 };
-
-        // allocate device buffer to hold message
-        cl::Buffer dev_input(context, CL_MEM_READ_ONLY, sizeof(int) * test_array_size);
-        cl::Buffer dev_output(context, CL_MEM_WRITE_ONLY, sizeof(int) * test_array_size);
-        cl::Buffer dev_mask(context, CL_MEM_READ_ONLY, sizeof(int) * mask_size);
+        program.build(devices, "-D BLOCK_SIZE=" STRINGIFY(BLOCK_SIZE));
+        const size_t double_size = sizeof(double);
+        Matrix result{ n };
+        cl::Buffer dev_input(context, CL_MEM_READ_ONLY, double_size * a.size());
+        cl::Buffer dev_mask(context, CL_MEM_READ_ONLY, double_size * b.size());
+        cl::Buffer dev_output(context, CL_MEM_WRITE_ONLY, double_size * result.size());
 
         // copy from cpu to gpu
-        queue.enqueueWriteBuffer(dev_input, CL_TRUE, 0, sizeof(int) * test_array_size, &input[0]);
-        queue.enqueueWriteBuffer(dev_mask, CL_TRUE, 0, sizeof(int)* mask_size, &mask[0]);
+        queue.enqueueWriteBuffer(dev_input, CL_TRUE, 0, double_size * a.size(), a.data());
+        queue.enqueueWriteBuffer(dev_mask, CL_TRUE, 0, double_size * b.size(), b.data());
 
-        // load named kernel from opencl source
-        queue.finish();
-        cl::Kernel kernel_gmem(program, "gpu_convolution_2d_gmem");
-        auto convolution_gmem = cl::KernelFunctor<cl::Buffer, cl::Buffer, cl::Buffer, int, int>(kernel_gmem);
-        cl::EnqueueArgs convolution_gmem_args{ queue, cl::NullRange, cl::NDRange(test_array_size), cl::NDRange(block_size) };
-        cl::Event event = convolution_gmem(convolution_gmem_args, dev_input, dev_mask, dev_output, mask_size, test_array_size);
-        //cl::KernelFunctor convolution_gmem(kernel_gmem, queue, cl::NullRange, cl::NDRange(test_array_size), cl::NDRange(block_size));
-        //cl::Event event = convolution_gmem(dev_input, dev_mask, dev_output, mask_size, test_array_size);
+        auto convolution_gmem = cl::KernelFunctor<cl::Buffer, cl::Buffer, cl::Buffer, int, int>(program, "gpu_convolution_2d_gmem");
+        const int N = std::max(32, closest_power_of_two(n));
+        cl::EnqueueArgs convolution_gmem_args{ queue, cl::NullRange, cl::NDRange(N, N), cl::NDRange(BLOCK_SIZE)};
+        cl::Event event = convolution_gmem(convolution_gmem_args, dev_input, dev_mask, dev_output, m, n);
+        event.wait();        
+        queue.enqueueReadBuffer(dev_output, CL_TRUE, 0, double_size * result.size(), result.data());
 
-        //cl::Kernel kernel_lmem(program, "gpu_convolution_lmem");
-        //auto convolution_lmem = cl::KernelFunctor<>(kernel_lmem);
-        //cl::EnqueueArgs convolution_lmem_args{ cl::NullRange, cl::NDRange(test_array_size), cl::NDRange(block_size) };
-        //convolution_lmem(convolution_lmem_args);
-        //cl::KernelFunctor convolution_lmem(kernel_lmem, queue, cl::NullRange, cl::NDRange(test_array_size), cl::NDRange(block_size));
-        //cl::Event event = convolution_lmem(dev_input, dev_mask, dev_output, mask_size, test_array_size, 
-        //cl::__local((block_size + mask_size) * sizeof(int)));
+        if (result != expected)
+        {
+            for (int i = 0; i < n; ++i)
+            {
+                for (int j = 0; j < n; ++j)
+                {
+                    if (!Matrix::are_equal(result.get(i, j), expected.get(i, j)))
+                    {
+                        const auto index_string = std::to_string(i) + ", " + std::to_string(j);
+                        throw std::logic_error("result is not equal to expected, differs in " + index_string + "\n");
+                    }
+                }
+            }
+            assert(false);
+        }
 
-        event.wait();
-        cl_ulong start_time = event.getProfilingInfo<CL_PROFILING_COMMAND_START>();
-        cl_ulong end_time = event.getProfilingInfo<CL_PROFILING_COMMAND_END>();
-        cl_ulong elapsed_time = end_time - start_time;
+        FILE *fout = fopen("output.txt", "w");
 
-        queue.enqueueReadBuffer(dev_output, CL_TRUE, 0, sizeof(int) * test_array_size, &output[0]);
-        for (size_t i = 0; i < test_array_size; ++i)
-            cout << output[i] << " ";
-        cout << endl;
+        if (fout == nullptr)
+        {
+            throw "Unable to open file";
+        }
 
-        cout << std::setprecision(2) << "Total time: " << elapsed_time / 1000000.0 << " ms" << endl;
+        for (int i = 0; i < n; ++i)
+        {
+            for (int j = 0; j < n; ++j)
+            {
+                fprintf(fout, "%.3lf ", result.get(i, j));
+            }
+            fprintf(fout, "\n");
+        }
+        fclose(fout);
     }
-    catch (cl::Error e)
+    catch (cl::Error &e)
     {
-        cout << "[ERROR] " << e.what() << " : " << e.err() << endl;
+        cout << "[OpenCL ERROR] " << e.what() << " : " << e.err() << endl;
+    }
+    catch (std::exception &e)
+    {
+        cout << "[ERROR] " << e.what();
     }
 
     return 0;
