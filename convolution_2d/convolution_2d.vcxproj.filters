@@ -26,4 +26,9 @@
   <ItemGroup>
     <None Include="convolution_2d.cl" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="cl2.hpp">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+  </ItemGroup>
 </Project>

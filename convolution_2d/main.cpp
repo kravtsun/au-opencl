@@ -151,10 +151,6 @@ Matrix convolve_2d_cpu(const Matrix &a, const Matrix &b)
     return res;
 }
 
-
-#define STRINGIFY(x) #x
-#define BLOCK_SIZE 16
-
 int closest_power_of_two(const int x)
 {
     if (x == 0)
@@ -178,7 +174,8 @@ int closest_power_of_two(const int x)
     return 1 << i;
 }
 
-
+#define STRINGIFY(x) #x
+#define BLOCK_SIZE 16
 Matrix solve(const Matrix &a, const Matrix &b)
 {
     const int n = a.dim();
