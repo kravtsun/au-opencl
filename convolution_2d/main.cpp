@@ -57,6 +57,11 @@ struct Matrix
         return &v_[0];
     }
 
+    const double *data() const
+    {
+        return &v_[0];
+    }
+
     friend std::istream &operator >> (std::istream &is, Matrix &matrix) {
         for (auto & x : matrix.v_)
         {
@@ -88,7 +93,7 @@ struct Matrix
         {
             return false;
         }
-        const size_t n = lhs.n_;
+        const int n = lhs.n_;
         for (int i = 0; i < n; ++i)
         {
             for (int j = 0; j < n; ++j)
@@ -173,96 +178,159 @@ int closest_power_of_two(const int x)
     return 1 << i;
 }
 
+
+Matrix solve(const Matrix &a, const Matrix &b)
+{
+    const int n = a.dim();
+    const int m = b.dim();
+
+    std::vector<cl::Platform> platforms;
+    std::vector<cl::Device> devices;
+    std::vector<cl::Kernel> kernels;
+
+    cl::Platform::get(&platforms);
+    platforms[0].getDevices(CL_DEVICE_TYPE_GPU, &devices);
+
+    cl::Context context(devices);
+    cl::CommandQueue queue(context, devices[0], CL_QUEUE_PROFILING_ENABLE);
+
+    std::ifstream cl_file("convolution_2d.cl");
+    std::string cl_string(std::istreambuf_iterator<char>(cl_file), (std::istreambuf_iterator<char>()));
+
+    cl::Program::Sources source({ cl_string });
+    cl::Program program(context, source);
+    program.build(devices, "-D BLOCK_SIZE=" STRINGIFY(BLOCK_SIZE));
+    const size_t double_size = sizeof(double);
+    Matrix result{ n };
+    cl::Buffer dev_input(context, CL_MEM_READ_ONLY, double_size * a.size());
+    cl::Buffer dev_mask(context, CL_MEM_READ_ONLY, double_size * b.size());
+    cl::Buffer dev_output(context, CL_MEM_WRITE_ONLY, double_size * result.size());
+
+    // copy from cpu to gpu
+    queue.enqueueWriteBuffer(dev_input, CL_TRUE, 0, double_size * a.size(), a.data());
+    queue.enqueueWriteBuffer(dev_mask, CL_TRUE, 0, double_size * b.size(), b.data());
+
+    auto convolution_gmem = cl::KernelFunctor<cl::Buffer, cl::Buffer, cl::Buffer, int, int>(program, "gpu_convolution_2d_gmem");
+    const int N = std::max(32, closest_power_of_two(n));
+    cl::EnqueueArgs convolution_gmem_args{ queue, cl::NullRange, cl::NDRange(N, N), cl::NDRange(BLOCK_SIZE) };
+    cl::Event event = convolution_gmem(convolution_gmem_args, dev_input, dev_mask, dev_output, m, n);
+    event.wait();
+    queue.enqueueReadBuffer(dev_output, CL_TRUE, 0, double_size * result.size(), result.data());
+
+    queue.finish();
+
+    return result;
+}
+
+void check_result(const Matrix &expected, const Matrix &result)
+{
+    if (expected.size() != result.size())
+    {
+        throw std::logic_error("result is not equal to expected, differs in size\n");
+    }
+    const int n = expected.dim();
+    if (result != expected)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            for (int j = 0; j < n; ++j)
+            {
+                if (!Matrix::are_equal(result.get(i, j), expected.get(i, j)))
+                {
+                    const auto index_string = std::to_string(i) + ", " + std::to_string(j);
+                    throw std::logic_error("result is not equal to expected, differs in " + index_string + "\n");
+                }
+            }
+        }
+        assert(false);
+    }
+}
+
+void write_result(const char *filename, const Matrix &result)
+{
+    const int n = result.dim();
+
+    FILE *fout = fopen(filename, "w");
+
+    if (fout == nullptr)
+    {
+        throw "Unable to open file";
+    }
+
+    for (int i = 0; i < n; ++i)
+    {
+        for (int j = 0; j < n; ++j)
+        {
+            fprintf(fout, "%.3lf ", result.get(i, j));
+        }
+        if (i + 1 != n)
+        {
+            fprintf(fout, "\n");
+        }
+    }
+    fclose(fout);
+}
+
+bool run_test(int n, int m)
+{
+    Matrix a(n), b(m);
+    std::fill(a.data(), a.data() + a.size(), 1);
+    std::fill(b.data(), b.data() + b.size(), 1);
+    auto expected = convolve_2d_cpu(a, b);
+    auto result = solve(a, b);
+    return result == expected;
+}
+
+
+void run_tests()
+{
+    std::vector<std::pair<int, int>> test_parameters = {
+        { 5, 3 },
+        { 1024, 3 },
+        { 1024, 9 },
+        { 1, 9 },
+        { 31, 9 },
+        { 1023, 9 }
+    };
+
+    for (auto const &test : test_parameters)
+    {
+        const auto test_string = "[" + std::to_string(test.first) + ", " + std::to_string(test.second) + "]";
+        if (run_test(test.first, test.second))
+        {
+            std::cout << "PASS " << test_string << std::endl;
+        }
+        else
+        {
+            std::cout << "FAIL " << test_string << std::endl;
+        }
+    }
+}
+
 int main()
 {
-    using std::vector;
-    using std::string;
-    using std::ifstream;
-    using std::cout;
-    using std::endl;
-
-    ifstream fin("input.txt");
+    std::ifstream fin("input.txt");
     int n, m;
     fin >> n >> m;
     Matrix a(n), b(m);
     fin >> a >> b;
     auto expected = convolve_2d_cpu(a, b);
 
-    vector<cl::Platform> platforms;
-    vector<cl::Device> devices;
-    vector<cl::Kernel> kernels;
-
     try {
-        cl::Platform::get(&platforms);
-        platforms[0].getDevices(CL_DEVICE_TYPE_GPU, &devices);
-
-        cl::Context context(devices);
-        cl::CommandQueue queue(context, devices[0], CL_QUEUE_PROFILING_ENABLE);
-
-        ifstream cl_file("convolution_2d.cl");
-        string cl_string(std::istreambuf_iterator<char>(cl_file), (std::istreambuf_iterator<char>()));
-
-        cl::Program::Sources source({ cl_string });
-        cl::Program program(context, source);
-        program.build(devices, "-D BLOCK_SIZE=" STRINGIFY(BLOCK_SIZE));
-        const size_t double_size = sizeof(double);
-        Matrix result{ n };
-        cl::Buffer dev_input(context, CL_MEM_READ_ONLY, double_size * a.size());
-        cl::Buffer dev_mask(context, CL_MEM_READ_ONLY, double_size * b.size());
-        cl::Buffer dev_output(context, CL_MEM_WRITE_ONLY, double_size * result.size());
-
-        // copy from cpu to gpu
-        queue.enqueueWriteBuffer(dev_input, CL_TRUE, 0, double_size * a.size(), a.data());
-        queue.enqueueWriteBuffer(dev_mask, CL_TRUE, 0, double_size * b.size(), b.data());
-
-        auto convolution_gmem = cl::KernelFunctor<cl::Buffer, cl::Buffer, cl::Buffer, int, int>(program, "gpu_convolution_2d_gmem");
-        const int N = std::max(32, closest_power_of_two(n));
-        cl::EnqueueArgs convolution_gmem_args{ queue, cl::NullRange, cl::NDRange(N, N), cl::NDRange(BLOCK_SIZE)};
-        cl::Event event = convolution_gmem(convolution_gmem_args, dev_input, dev_mask, dev_output, m, n);
-        event.wait();        
-        queue.enqueueReadBuffer(dev_output, CL_TRUE, 0, double_size * result.size(), result.data());
-
-        if (result != expected)
-        {
-            for (int i = 0; i < n; ++i)
-            {
-                for (int j = 0; j < n; ++j)
-                {
-                    if (!Matrix::are_equal(result.get(i, j), expected.get(i, j)))
-                    {
-                        const auto index_string = std::to_string(i) + ", " + std::to_string(j);
-                        throw std::logic_error("result is not equal to expected, differs in " + index_string + "\n");
-                    }
-                }
-            }
-            assert(false);
-        }
-
-        FILE *fout = fopen("output.txt", "w");
-
-        if (fout == nullptr)
-        {
-            throw "Unable to open file";
-        }
-
-        for (int i = 0; i < n; ++i)
-        {
-            for (int j = 0; j < n; ++j)
-            {
-                fprintf(fout, "%.3lf ", result.get(i, j));
-            }
-            fprintf(fout, "\n");
-        }
-        fclose(fout);
+        auto result = solve(a, b);
+        check_result(expected, result);
+        write_result("output.txt", result);
     }
     catch (cl::Error &e)
     {
-        cout << "[OpenCL ERROR] " << e.what() << " : " << e.err() << endl;
+        std::cout << "[OpenCL ERROR] " << e.what() << " : " << e.err() << std::endl;
     }
     catch (std::exception &e)
     {
-        cout << "[ERROR] " << e.what();
+        std::cout << "[ERROR] " << e.what();
     }
+
+    //run_tests();
 
     return 0;
 }
