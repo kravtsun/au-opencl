@@ -212,6 +212,10 @@ Matrix solve(const Matrix &a, const Matrix &b)
     cl::EnqueueArgs convolution_gmem_args{ queue, cl::NullRange, cl::NDRange(N, N), cl::NDRange(BLOCK_SIZE) };
     cl::Event event = convolution_gmem(convolution_gmem_args, dev_input, dev_mask, dev_output, m, n);
     event.wait();
+    cl_ulong start_time = event.getProfilingInfo<CL_PROFILING_COMMAND_START>();
+    cl_ulong end_time = event.getProfilingInfo<CL_PROFILING_COMMAND_END>();
+    cl_ulong elapsed_time = end_time - start_time;
+    std::cout << std::setprecision(2) << "Total time: " << elapsed_time / 1000000.0 << " ms" << std::endl;
     queue.enqueueReadBuffer(dev_output, CL_TRUE, 0, double_size * result.size(), result.data());
 
     queue.finish();
