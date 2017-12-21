@@ -48,6 +48,14 @@ int closest_power_of_two(const int x)
 
 using vector = std::vector<int>;
 
+void profile_events(const cl::Event &start_event, const cl::Event finish_event, const std::string &s = "Total time: ")
+{
+    cl_ulong start_time = start_event.getProfilingInfo<CL_PROFILING_COMMAND_START>();
+    cl_ulong end_time = finish_event.getProfilingInfo<CL_PROFILING_COMMAND_END>();
+    cl_ulong elapsed_time = end_time - start_time;
+    std::cout << std::setprecision(2) << s << elapsed_time / 1000000.0 << " ms" << std::endl;
+}
+
 vector solve(const vector &v)
 {
     const int n = v.size();
@@ -90,42 +98,41 @@ vector solve(const vector &v)
 
     auto a = cl::Local(double_size * BLOCK_SIZE);
     auto b = cl::Local(double_size * BLOCK_SIZE);
-    
+
     // copy from cpu to gpu
     queue.enqueueWriteBuffer(dev_input, CL_TRUE, 0, double_size * v.size(), v.data());
-    
+
     cl::EnqueueArgs global_args{ queue, cl::NullRange, cl::NDRange(N), cl::NDRange(BLOCK_SIZE) };
-    
+
     auto bottom_up = cl::KernelFunctor<cl::Buffer, cl::Buffer, cl::LocalSpaceArg, cl::LocalSpaceArg>(program, "bottom_up");
     auto start_event = bottom_up(global_args, dev_input, dev_output, a, b);
-    //event.wait();
+    start_event.wait();
+    profile_events(start_event, start_event, "bottom_up: ");
 
-    //vector tmp(N);
-    //queue.enqueueReadBuffer(dev_output, CL_TRUE, 0, double_size * N, tmp.data());
+    //vector tmp(n);
+    //queue.enqueueReadBuffer(dev_output, CL_TRUE, 0, double_size * n, tmp.data());
 
-    auto reduce_blocks = cl::KernelFunctor<cl::Buffer, cl::Buffer, cl::LocalSpaceArg, cl::LocalSpaceArg>(program, "reduce_blocks");
+    auto reduce_blocks = cl::KernelFunctor<cl::Buffer, cl::Buffer, cl::LocalSpaceArg, cl::LocalSpaceArg, uint>(program, "reduce_blocks");
     const int NBLOCKS = std::max(N / BLOCK_SIZE, BLOCK_SIZE);
     cl::Buffer block_output(context, CL_MEM_READ_WRITE, double_size * NBLOCKS);
-    cl::EnqueueArgs block_args{ queue, cl::NullRange, cl::NDRange(NBLOCKS), cl::NDRange(BLOCK_SIZE) };
-    reduce_blocks(block_args, dev_output, block_output, a, b);
-    //event.wait();
+    cl::EnqueueArgs block_args{ queue, cl::NullRange, cl::NDRange(BLOCK_SIZE), cl::NDRange(BLOCK_SIZE) };
+    auto event = reduce_blocks(block_args, dev_output, block_output, a, b, N);
+    event.wait();
+    profile_events(event, event, "reduce_blocks: ");
 
     //vector tmp_blocks(NBLOCKS);
     //queue.enqueueReadBuffer(block_output, CL_TRUE, 0, double_size * NBLOCKS, tmp_blocks.data());
+    //return tmp_blocks;
 
     auto reduce_all = cl::KernelFunctor<cl::Buffer, cl::Buffer>(program, "reduce_all");
     auto finish_event = reduce_all(global_args, dev_output, block_output);
     finish_event.wait();
+    profile_events(finish_event, finish_event, "bottom_up: ");
 
     //vector tmp(N);
     //queue.enqueueReadBuffer(dev_output, CL_TRUE, 0, double_size * N, tmp.data());
-    
-    //return tmp;
 
-    cl_ulong start_time = start_event.getProfilingInfo<CL_PROFILING_COMMAND_START>();
-    cl_ulong end_time = finish_event.getProfilingInfo<CL_PROFILING_COMMAND_END>();
-    cl_ulong elapsed_time = end_time - start_time;
-    std::cout << std::setprecision(2) << "Total time: " << elapsed_time / 1000000.0 << " ms" << std::endl;
+    //return tmp;
 
     vector result(v.size());
     queue.enqueueReadBuffer(dev_output, CL_TRUE, 0, double_size * v.size(), result.data());
@@ -169,7 +176,7 @@ int main()
             double s = 0.0;
             for (int i = 0; i < n; ++i)
             {
-                if (i > 0 && result[i] != result[i-1] + 1)
+                if (i > 0 && result[i] != result[i - 1] + 1)
                 {
                     std::cout << i + 1 << std::endl;
                     break;
@@ -188,6 +195,6 @@ int main()
     {
         std::cout << "[ERROR] " << e.what();
     }
-    
+
     return 0;
 }
